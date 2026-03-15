@@ -1,0 +1,10 @@
+{
+  "id": "com.qwen.copy_text",
+  "name": "Copy Text",
+  "description": "Extract and copy text to clipboard",
+  "icon": "📋",
+  "triggers": {
+    "universal": true,
+    "keywords": ["text", "code", "message", "number", "email"]
+  }
+}

@@ -1,4 +1,5 @@
 import os
+import time
 import cv2
 import numpy as np
 import torch
@@ -10,6 +11,10 @@ from transformers import (
     WhisperProcessor, 
     WhisperForConditionalGeneration
 )
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Explicit check for transformers version
 TRANSFORMERS_VERSION = transformers.__version__
@@ -24,25 +29,25 @@ except ImportError:
 # ... (rest of imports)
 
 class Sam2Predictor:
-    def __init__(self, model_id="facebook/sam2-hiera-tiny"):
+    def __init__(self, model_id=None):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model_id = model_id
-        print(f"Loading SAM2 model: {model_id} on {self.device}...")
+        self.model_id = model_id or os.getenv("SAM2_MODEL", "facebook/sam2-hiera-tiny")
+        print(f"Loading SAM2 model: {self.model_id} on {self.device}...")
         
         # SAM2 requirement: transformers >= 4.45.0
         # Reference: https://huggingface.co/facebook/sam2-hiera-large
         try:
-            print(f"[SAM2] Loading Model: {model_id}")
+            print(f"[SAM2] Loading Model: {self.model_id}")
             self.model = Sam2Model.from_pretrained(
-                model_id, 
+                self.model_id, 
                 trust_remote_code=True,
                 torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
             ).to(self.device)
             
             print(f"[SAM2] Loading Processor...")
-            self.processor = Sam2Processor.from_pretrained(model_id, trust_remote_code=True)
+            self.processor = Sam2Processor.from_pretrained(self.model_id, trust_remote_code=True)
             
-            print(f"Successfully loaded SAM2 from {model_id} using Sam2Model/Sam2Processor")
+            print(f"Successfully loaded SAM2 from {self.model_id} using Sam2Model/Sam2Processor")
         except Exception as e:
             print(f"CRITICAL ERROR: Failed to load SAM2.")
             print(f"Transformers: {TRANSFORMERS_VERSION}, Torch: {torch.__version__}")
@@ -68,11 +73,20 @@ class Sam2Predictor:
         # points should be list of lists: [[x1, y1], [x2, y2], ...]
         # labels should be list of ints: [1, 0, ...]
         
-        input_points = [[points]] # 4D: (1, 1, N, 2)
-        input_labels = [[labels]] # 3D: (1, 1, N)
+        # FIX: Ensure all points and labels are standard Python types (not numpy)
+        # Convert points to list of lists of floats
+        safe_points = []
+        for p in points:
+            safe_points.append([float(p[0]), float(p[1])])
+            
+        # Convert labels to list of ints
+        safe_labels = [int(l) for l in labels]
+        
+        input_points = [[safe_points]] # 4D: (1, 1, N, 2)
+        input_labels = [[safe_labels]] # 3D: (1, 1, N)
         
         try:
-            print(f"[SAM2] Predict called for {len(points)} points")
+            # print(f"[SAM2] Predict called for {len(safe_points)} points") # Suppress noisy log
             inputs = self.processor(
                 images=image, 
                 input_points=input_points, 
@@ -110,41 +124,210 @@ class Sam2Predictor:
             print(traceback.format_exc())
             raise e
 
-    def predict_video(self, video_path, points, labels, timestamp):
+    def propagate_in_video(self, video_path, points, labels, frame_idx, start_frame=0, end_frame=None):
         """
-        Perform video object segmentation.
-        Since we don't have the full Sam2VideoPredictor from the official repo (we are using transformers),
-        we implement a frame-by-frame tracking loop using the image model.
-        This is a simplified approach:
-        1. Segment the prompt frame.
-        2. Use the mask from frame T as a prompt (box or mask) for frame T+1.
-        3. Repeat for the whole video.
+        Propagate segmentation mask in video within a specific frame range.
         
-        Returns: Path to the output video with mask overlay.
+        Args:
+            video_path: Path to input video
+            points: Initial points for SAM2
+            labels: Initial labels for SAM2
+            frame_idx: Index of the frame where points were clicked
+            start_frame: Index to start processing (inclusive)
+            end_frame: Index to end processing (exclusive), None for end of video
+            
+        Returns: 
+            (output_video_path, mask_data)
         """
         import tempfile
+        try:
+            # Try MoviePy v2.0+ imports (direct import)
+            from moviepy import ImageSequenceClip, AudioFileClip, VideoFileClip
+        except ImportError:
+            # Fallback to MoviePy v1.0 imports (moviepy.editor)
+            try:
+                from moviepy.editor import ImageSequenceClip, AudioFileClip, VideoFileClip
+            except ImportError:
+                raise ImportError("MoviePy is not installed correctly. Please install moviepy.")
         
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError("Could not open video")
             
         fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        prompt_frame_idx = int(timestamp * fps)
+        if end_frame is None or end_frame > total_frames:
+            end_frame = total_frames
+            
+        # Ensure range is valid
+        start_frame = max(0, start_frame)
+        end_frame = min(total_frames, end_frame)
         
-        # Output video
-        output_path = video_path.replace(".mp4", "_segmented.mp4")
-        # Use moviepy for better compatibility
-        # fourcc = cv2.VideoWriter_fourcc(*'avc1') 
-        # out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        print(f"[SAM2 Video] Processing range: Frames {start_frame} to {end_frame} (Total video: {total_frames})")
+        print(f"[SAM2 Video] Prompt at frame {frame_idx}")
         
-        print(f"[SAM2 Video] Processing {total_frames} frames. Prompt at frame {prompt_frame_idx}")
+        # We need to process frames sequentially from the prompt frame
+        # Strategy:
+        # 1. Forward pass: frame_idx -> end_frame
+        # 2. Backward pass: frame_idx -> start_frame
+        # But since we use a simple image-to-image tracking (simulated video prop), 
+        # we might just do forward for prototype simplicity if prompt is at start.
+        # If prompt is in middle, we need bidirectional.
         
-        # Read all frames to memory? Video might be large.
-        # But we need random access for propagation (start from middle).
+        # For this prototype, we will implement a simple tracker:
+        # We start from the prompt frame and track forward to end_frame.
+        # Then we start from prompt frame and track backward to start_frame.
+        # Then we combine.
+        
+        processed_frames = {} # frame_idx -> annotated_frame (RGB numpy)
+        
+        # 1. Get Prompt Frame Mask
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret: raise RuntimeError("Failed to read prompt frame")
+        
+        # Initial prediction
+        mask, _ = self.predict(frame, points, labels) # mask is (H, W) binary
+        
+        # Draw on prompt frame
+        annotated_prompt = self.overlay_mask(frame, mask)
+        processed_frames[frame_idx] = cv2.cvtColor(annotated_prompt, cv2.COLOR_BGR2RGB)
+        
+        current_mask = mask
+        current_box = self.mask_to_box(mask) # [x, y, w, h]
+        
+        # 2. Forward Tracking (frame_idx + 1 -> end_frame)
+        # We use a simple bbox tracking or re-prompting with center of mass for next frame
+        # This is a heuristic since we don't have the stateful video predictor API in transformers yet.
+        # Real SAM2 Video API would maintain memory bank.
+        
+        # Optimization: We only process if we have a valid mask
+        if current_box:
+            # Re-open cap to ensure seek
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx + 1)
+            
+            for i in range(frame_idx + 1, end_frame):
+                ret, frame = cap.read()
+                if not ret: break
+                
+                # Use previous mask's center as a prompt for this frame?
+                # Or use the whole box as prompt?
+                # Let's use the center of the previous mask as a positive point.
+                # This is a naive tracker.
+                
+                if current_box:
+                    cx = current_box[0] + current_box[2] // 2
+                    cy = current_box[1] + current_box[3] // 2
+                    
+                    # Predict with new point prompt
+                    # We assume object doesn't move too fast
+                    new_mask, _ = self.predict(frame, [[cx, cy]], [1])
+                    
+                    # Update state
+                    current_mask = new_mask
+                    current_box = self.mask_to_box(new_mask)
+                    
+                    # Overlay
+                    annotated = self.overlay_mask(frame, new_mask)
+                    processed_frames[i] = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                else:
+                    # Lost track
+                    processed_frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # 3. Backward Tracking (frame_idx - 1 -> start_frame)
+        # Reset to prompt mask
+        current_mask = mask
+        current_box = self.mask_to_box(mask)
+        
+        if current_box and start_frame < frame_idx:
+             # We need to read backwards. OpenCV doesn't support reverse reading efficiently.
+             # We iterate backwards by setting pos frames.
+             for i in range(frame_idx - 1, start_frame - 1, -1):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ret, frame = cap.read()
+                if not ret: break
+                
+                if current_box:
+                    cx = current_box[0] + current_box[2] // 2
+                    cy = current_box[1] + current_box[3] // 2
+                    
+                    new_mask, _ = self.predict(frame, [[cx, cy]], [1])
+                    
+                    current_mask = new_mask
+                    current_box = self.mask_to_box(new_mask)
+                    
+                    annotated = self.overlay_mask(frame, new_mask)
+                    processed_frames[i] = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                else:
+                    processed_frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        cap.release()
+        
+        # 4. Assemble Video
+        # We only have processed frames. What about the rest?
+        # The user only wants the segment? Or the whole video with segment highlighted?
+        # Usually "Trim" implies we only return the segment.
+        # Let's return ONLY the segmented clip.
+        
+        output_frames = []
+        for i in range(start_frame, end_frame):
+            if i in processed_frames:
+                output_frames.append(processed_frames[i])
+            else:
+                # If frame wasn't processed (e.g. tracking lost or gap), read raw
+                cap_fill = cv2.VideoCapture(video_path)
+                cap_fill.set(cv2.CAP_PROP_POS_FRAMES, i)
+                _, raw = cap_fill.read()
+                cap_fill.release()
+                if raw is not None:
+                    output_frames.append(cv2.cvtColor(raw, cv2.COLOR_BGR2RGB))
+        
+        if not output_frames:
+            raise RuntimeError("No frames processed")
+            
+        output_path = os.path.join("temp", f"segment_{int(time.time())}.mp4")
+        clip = ImageSequenceClip(output_frames, fps=fps)
+        
+        # Add audio
+        try:
+            original_clip = VideoFileClip(video_path)
+            # Cut audio to match range
+            # MoviePy 2.0+ uses 'subclipped' or slice syntax, 1.0 uses 'subclip'
+            # Let's try robust approach
+            t_start = start_frame / fps
+            t_end = end_frame / fps
+            
+            if hasattr(original_clip.audio, 'subclipped'):
+                audio = original_clip.audio.subclipped(t_start, t_end)
+            elif hasattr(original_clip.audio, 'subclip'):
+                audio = original_clip.audio.subclip(t_start, t_end)
+            else:
+                # Fallback for some versions
+                audio = original_clip.audio
+                
+            clip = clip.set_audio(audio)
+        except Exception as e:
+            print(f"Warning: Could not add audio to segment: {e}")
+            
+        clip.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
+        
+        return output_path, "mask_data_placeholder"
+
+    def mask_to_box(self, mask):
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+        if not np.any(rows) or not np.any(cols):
+            return None
+        ymin, ymax = np.where(rows)[0][[0, -1]]
+        xmin, xmax = np.where(cols)[0][[0, -1]]
+        return [xmin, ymin, xmax - xmin, ymax - ymin] # x, y, w, h
+
+    def overlay_mask(self, image, mask, color=(0, 255, 0), alpha=0.5):
+        # image is BGR
+        masked = image.copy()
+        masked[mask > 0] = masked[mask > 0] * (1 - alpha) + np.array(color) * alpha
+        return masked.astype(np.uint8)
         # Let's read them into a list if memory allows (SAM2 usually requires high memory anyway).
         # For long videos, this might crash. But let's assume reasonable size for now.
         frames = []
@@ -330,12 +513,13 @@ class Sam2Predictor:
         return output_path
 
 class WhisperTranscriber:
-    def __init__(self, model_id="openai/whisper-tiny"):
+    def __init__(self, model_id=None):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Loading Whisper model: {model_id} on {self.device}...")
+        self.model_id = model_id or os.getenv("WHISPER_MODEL", "openai/whisper-tiny")
+        print(f"Loading Whisper model: {self.model_id} on {self.device}...")
         try:
-            self.processor = WhisperProcessor.from_pretrained(model_id)
-            self.model = WhisperForConditionalGeneration.from_pretrained(model_id).to(self.device)
+            self.processor = WhisperProcessor.from_pretrained(self.model_id)
+            self.model = WhisperForConditionalGeneration.from_pretrained(self.model_id).to(self.device)
         except Exception as e:
             print(f"CRITICAL ERROR: Failed to load Whisper: {e}")
             raise RuntimeError(f"Whisper Loading Failed: {e}. Please check your environment.")
@@ -439,7 +623,7 @@ class QwenVLGenerator:
     def __init__(self):
         pass
 
-    def generate(self, image: Image.Image, context_text: str, api_key: str = None, base_url: str = None, model_name: str = "Qwen/Qwen2-VL-7B-Instruct"):
+    def generate(self, image: Image.Image, context_text: str, api_key: str = None, base_url: str = None, model_name: str = None):
         # Prioritize passed api_key, then env var
         final_api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
         
@@ -466,15 +650,17 @@ class QwenVLGenerator:
         try:
             # Determine Base URL
             # Default to SiliconFlow if no base_url provided, as Aliyun is explicitly removed
-            final_base_url = "https://api.siliconflow.cn/v1" 
-            if base_url:
-                clean_base_url = base_url.strip()
+            final_base_url = base_url or os.getenv("DASHSCOPE_BASE_URL", "https://api.siliconflow.cn/v1")
+            if final_base_url:
+                clean_base_url = final_base_url.strip()
                 if clean_base_url:
                     # Remove trailing slashes to avoid // in URL
                     final_base_url = clean_base_url.rstrip('/')
             
+            final_model_name = model_name or os.getenv("QWEN_MODEL", "Qwen/Qwen2-VL-7B-Instruct")
+
             print(f"[QwenVL] Connecting to: {final_base_url}")
-            print(f"[QwenVL] Model: {model_name}")
+            print(f"[QwenVL] Model: {final_model_name}")
             # Do NOT print the full API Key for security, but print length or first few chars
             masked_key = f"{final_api_key[:8]}...{final_api_key[-4:]}" if len(final_api_key) > 12 else "***"
             print(f"[QwenVL] API Key: {masked_key}")
@@ -492,7 +678,7 @@ class QwenVLGenerator:
             print(f"[QwenVL] Prompt: {prompt}")
             
             response = client.chat.completions.create(
-                model=model_name,
+                model=final_model_name,
                 messages=[
                     {
                         "role": "user",

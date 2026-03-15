@@ -13,9 +13,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Import custom utilities (to be implemented)
 from utils import Sam2Predictor, WhisperTranscriber, QwenVLGenerator
+from plugin_system import PluginManager
 
 from fastapi.staticfiles import StaticFiles
 
@@ -23,6 +28,9 @@ from starlette.requests import Request
 import time
 
 app = FastAPI()
+
+# Initialize Plugin Manager
+plugin_manager = PluginManager()
 
 # Middleware to log requests
 @app.middleware("http")
@@ -85,161 +93,131 @@ async def upload_video(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
     return {"filename": file.filename, "path": file_path}
 
-@app.post("/predict")
-async def predict(
+@app.post("/process")
+async def process_video(
     video_path: str = Form(...),
-    x: Optional[float] = Form(None),
-    y: Optional[float] = Form(None),
-    points_json: Optional[str] = Form(None),
-    labels_json: Optional[str] = Form(None),
-    timestamp: float = Form(...),  # Time in seconds
+    points_json: str = Form(...),
+    labels_json: str = Form(...),
+    timestamp: float = Form(...),
     frame_width: int = Form(...),
     frame_height: int = Form(...),
+    start_time: float = Form(0.0),
+    end_time: float = Form(10.0),
     api_key: Optional[str] = Form(None),
     base_url: Optional[str] = Form(None),
-    qwen_model: str = Form("Qwen/Qwen2-VL-7B-Instruct"),
-    sam2_model: str = Form("facebook/sam2-hiera-tiny")
+    qwen_model: str = Form(os.getenv("QWEN_MODEL", "Qwen/Qwen2-VL-7B-Instruct")),
+    sam2_model: str = Form(os.getenv("SAM2_MODEL", "facebook/sam2-hiera-tiny"))
 ):
     global sam2_predictor, whisper_transcriber, qwen_vl_generator
+
+    # 1. Initialize models
+    if sam2_predictor is None or sam2_predictor.model_id != sam2_model:
+        sam2_predictor = Sam2Predictor(model_id=sam2_model)
+    if whisper_transcriber is None:
+        whisper_transcriber = WhisperTranscriber()
+    if qwen_vl_generator is None:
+        qwen_vl_generator = QwenVLGenerator()
+
+    # 2. Extract Frame at Timestamp for Visual Prompt
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_idx = int(timestamp * fps)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        raise HTTPException(status_code=400, detail="Could not read frame")
+
+    # 3. Coordinate Scaling
+    orig_h, orig_w = frame.shape[:2]
+    scale_x = orig_w / frame_width
+    scale_y = orig_h / frame_height
+    
+    raw_points = json.loads(points_json)
+    raw_labels = json.loads(labels_json)
+    
+    scaled_points = []
+    for p in raw_points:
+        scaled_points.append([p[0] * scale_x, p[1] * scale_y])
+
+    # 4. SAM2 Video Propagation (Constrained by Time Range)
+    # We need to pass start/end frames to predictor
+    start_frame = int(start_time * fps)
+    end_frame = int(end_time * fps)
+    
+    print(f"Processing video from {start_time}s to {end_time}s (Frames {start_frame}-{end_frame})")
+    
+    mask_video_path, mask_data = sam2_predictor.propagate_in_video(
+        video_path, 
+        points=scaled_points, 
+        labels=raw_labels, 
+        frame_idx=frame_idx,
+        start_frame=start_frame,
+        end_frame=end_frame
+    )
+    
+    # 5. Whisper Transcription (Constrained by Time Range)
+    # Extract audio segment first? Or just transcribe whole and filter?
+    # Whisper usually takes audio file.
+    # Let's extract audio segment using moviepy
+    try:
+        from moviepy import VideoFileClip
+    except ImportError:
+        try:
+            from moviepy.editor import VideoFileClip
+        except ImportError:
+            print("Warning: MoviePy not found for audio extraction")
+            VideoFileClip = None
     
     try:
-        # 1. Initialize models if needed
-        if sam2_predictor is None:
-             sam2_predictor = Sam2Predictor(model_id=sam2_model)
-        elif sam2_predictor.model_id != sam2_model:
-             print(f"Switching SAM2 model from {sam2_predictor.model_id} to {sam2_model}")
-             sam2_predictor = Sam2Predictor(model_id=sam2_model)
-
-        if whisper_transcriber is None:
-             whisper_transcriber = WhisperTranscriber()
-        if qwen_vl_generator is None:
-             qwen_vl_generator = QwenVLGenerator()
-
-        # 2. Extract Frame
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise HTTPException(status_code=400, detail="Could not open video")
+        video = VideoFileClip(video_path)
+        # Ensure subclip is valid
+        duration = video.duration
+        t1 = max(0, start_time)
+        t2 = min(duration, end_time)
         
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_idx = int(timestamp * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        cap.release()
+        audio_segment_path = os.path.join("temp", f"audio_{int(time.time())}.mp3")
         
-        if not ret:
-            raise HTTPException(status_code=400, detail="Could not read frame")
-
-        orig_h, orig_w = frame.shape[:2]
-        scale_x = orig_w / frame_width
-        scale_y = orig_h / frame_height
-        
-        final_points = []
-        final_labels = []
-
-        # Process new points/labels format
-        if points_json and labels_json:
-            try:
-                raw_points = json.loads(points_json)
-                raw_labels = json.loads(labels_json)
-                
-                if len(raw_points) != len(raw_labels):
-                    raise ValueError("Points and labels length mismatch")
-                
-                # Optimization: Downsample points if too many (e.g. scribble)
-                # SAM2 works best with fewer, well-placed points.
-                # If we have > 30 points, we take every K-th point.
-                if len(raw_points) > 30:
-                    step = len(raw_points) // 20
-                    raw_points = raw_points[::step]
-                    raw_labels = raw_labels[::step]
-                    print(f"[Main] Downsampled points from {len(raw_points)*step} to {len(raw_points)}")
-
-                for p in raw_points:
-                    final_points.append([int(p[0] * scale_x), int(p[1] * scale_y)])
-                final_labels = raw_labels
-                
-                print(f"[Main] Received {len(final_points)} points via JSON.")
-            except Exception as e:
-                print(f"[Main] Error parsing points_json/labels_json: {e}")
-        
-        # Fallback to single point if no list provided
-        if not final_points and x is not None and y is not None:
-            actual_x = int(x * scale_x)
-            actual_y = int(y * scale_y)
-            final_points = [[actual_x, actual_y]]
-            final_labels = [1]
-            print(f"[Main] Using legacy single point: ({actual_x}, {actual_y})")
+        # Handle MoviePy 1.x vs 2.x subclip
+        if hasattr(video, 'subclipped'):
+            segment = video.subclipped(t1, t2)
+        else:
+            segment = video.subclip(t1, t2)
             
-        if not final_points:
-            raise HTTPException(status_code=400, detail="No points provided")
+        segment.audio.write_audiofile(audio_segment_path, logger=None)
         
-        print(f"--- Processing Start ---")
+        transcription = whisper_transcriber.transcribe(audio_segment_path)
         
-        # 3. SAM2 Inference
-        print(f"[Main] Step 2: Running SAM2 Video Segmentation with {len(final_points)} points...")
-        # Old single frame call:
-        # mask, masked_image = sam2_predictor.predict(frame, final_points, final_labels)
-        
-        # New video call:
-        output_video_path = sam2_predictor.predict_video(video_path, final_points, final_labels, timestamp)
-        
-        # We still need a single mask for QwenVL?
-        # QwenVL usually describes the object. 
-        # Let's use the mask from the *prompt frame* for QwenVL generation.
-        # So we can call predict() once for the prompt frame to get the mask/image for Qwen.
-        mask, masked_image = sam2_predictor.predict(frame, final_points, final_labels)
-        
-        # 4. Whisper Transcription
-        print(f"[Main] Step 3: Running Whisper Transcription at {timestamp}s...")
-        audio_text = whisper_transcriber.transcribe_segment(video_path, timestamp, duration=5.0)
-        print(f"[Main] Whisper Result: {audio_text}")
-        
-        # 5. Qwen VL Generation
-        print(f"[Main] Step 4: Running Qwen VL Encyclopedia Generation...")
-        encyclopedia_text = qwen_vl_generator.generate(
-            masked_image, 
-            audio_text, 
-            api_key=api_key, 
-            base_url=base_url,
-            model_name=qwen_model
-        )
-        print(f"[Main] Qwen Result: {encyclopedia_text[:100]}...")
-        print(f"--- Processing End ---")
-        
-        # 6. Encode mask for response
-        # We return the video path now.
-        # But frontend expects "mask" as base64 image.
-        # We should update frontend to accept video url.
-        # For backward compatibility or immediate display, we can still return the frame mask.
-        # And ADD the video url.
-        
-        _, buffer = cv2.imencode('.png', (mask * 255).astype(np.uint8))
-        mask_base64 = base64.b64encode(buffer).decode('utf-8')
-        
-        # Create a temp URL for the output video
-        output_filename = os.path.basename(output_video_path)
-        video_url = f"http://localhost:8000/temp/{output_filename}"
-        
-        return JSONResponse({
-            "mask": f"data:image/png;base64,{mask_base64}", # Keep for Qwen logic/compatibility
-            "transcription": audio_text,
-            "encyclopedia": encyclopedia_text,
-            "segmented_video_url": video_url # New field
-        })
-
+        # Cleanup audio
+        if os.path.exists(audio_segment_path):
+            os.remove(audio_segment_path)
+            
     except Exception as e:
-        import traceback
-        error_msg = f"Prediction failed: {str(e)}"
-        print(f"[CRITICAL ERROR] {error_msg}")
-        print(traceback.format_exc())
-        # Return 500 with details for debugging
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": error_msg,
-                "traceback": traceback.format_exc()
-            }
-        )
+        print(f"Audio processing failed: {e}")
+        transcription = "(Audio transcription failed)"
+
+    # 6. Qwen VL Encyclopedia
+    # Use the static frame we extracted earlier
+    pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    encyclopedia = qwen_vl_generator.generate(
+        pil_image, 
+        context_text=transcription,
+        api_key=api_key,
+        base_url=base_url,
+        model_name=qwen_model
+    )
+    
+    # Return result
+    # We return the path to the MASKED video segment
+    # mask_video_path is absolute, make it relative to serve
+    relative_video_url = f"/temp/{os.path.basename(mask_video_path)}"
+    
+    return {
+        "video_url": relative_video_url,
+        "transcription": transcription,
+        "encyclopedia": encyclopedia
+    }
 
 class ScreenAnalysisRequest(BaseModel):
     image: str # Base64 encoded
@@ -340,11 +318,17 @@ async def analyze_screen(request: ScreenAnalysisRequest):
                 base_url=request.base_url,
                 model_name=model_name
             )
+            
+        # 5. Plugin Matching
+        available_plugins = []
+        if description:
+            available_plugins = plugin_manager.match_plugins(description)
 
         return {
             "svg_path": svg_path,
             "bbox": bbox,
-            "description": description
+            "description": description,
+            "plugins": available_plugins
         }
 
     except Exception as e:
@@ -358,10 +342,10 @@ import subprocess
 
 # Global config store
 global_config = {
-    "api_key": None,
-    "base_url": "https://api.siliconflow.cn/v1",
-    "qwen_model": "Qwen/Qwen2-VL-7B-Instruct",
-    "sam2_model": "facebook/sam2-hiera-tiny"
+    "api_key": os.getenv("DASHSCOPE_API_KEY"),
+    "base_url": os.getenv("DASHSCOPE_BASE_URL", "https://api.siliconflow.cn/v1"),
+    "qwen_model": os.getenv("QWEN_MODEL", "Qwen/Qwen2-VL-7B-Instruct"),
+    "sam2_model": os.getenv("SAM2_MODEL", "facebook/sam2-hiera-tiny")
 }
 
 class LaunchHUDRequest(BaseModel):
@@ -404,6 +388,87 @@ async def launch_hud(request: LaunchHUDRequest):
 @app.get("/system/config")
 async def get_config():
     return global_config
+
+class PluginExecuteRequest(BaseModel):
+    plugin_id: str
+    context: dict
+
+@app.post("/plugin/execute")
+async def execute_plugin(request: PluginExecuteRequest):
+    return plugin_manager.execute_plugin(request.plugin_id, request.context)
+
+class ChatRequest(BaseModel):
+    image: str # Base64 encoded (Full screenshot)
+    bbox: List[int] # [x, y, w, h]
+    messages: List[dict] # [{"role": "user", "content": "..."}]
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    qwen_model: Optional[str] = None
+
+@app.post("/analyze/chat")
+async def analyze_chat(request: ChatRequest):
+    global qwen_vl_generator
+    try:
+        # Decode Image
+        if "," in request.image:
+            header, encoded = request.image.split(",", 1)
+        else:
+            encoded = request.image
+        image_data = base64.b64decode(encoded)
+        pil_image = Image.open(BytesIO(image_data)).convert("RGB")
+        frame = np.array(pil_image)
+        # Convert RGB to BGR for processing (if needed) but PIL is RGB
+        
+        # Crop Image based on BBox
+        x, y, w, h = request.bbox
+        if w > 0 and h > 0:
+             # Add padding
+            padding = 50
+            h_img, w_img = frame.shape[:2]
+            x1 = max(0, x - padding)
+            y1 = max(0, y - padding)
+            x2 = min(w_img, x + w + padding)
+            y2 = min(h_img, y + h + padding)
+            cropped_frame = frame[y1:y2, x1:x2]
+            cropped_pil = Image.fromarray(cropped_frame) # frame is RGB from PIL
+        else:
+            cropped_pil = pil_image
+
+        # Initialize Qwen if needed
+        if qwen_vl_generator is None:
+            qwen_vl_generator = QwenVLGenerator()
+            
+        model_name = request.qwen_model or global_config.get("qwen_model") or "Qwen/Qwen2-VL-7B-Instruct"
+        
+        # Construct Prompt from messages
+        # QwenVLGenerator.generate currently only takes a single prompt context_text.
+        # We need to adapt it or extend it. 
+        # For now, let's take the LAST user message and prepend previous context as text.
+        
+        last_user_msg = request.messages[-1]['content']
+        history_text = ""
+        if len(request.messages) > 1:
+            history_text = "Previous conversation:\n"
+            for msg in request.messages[:-1]:
+                history_text += f"{msg['role']}: {msg['content']}\n"
+        
+        final_prompt = f"{history_text}\nUser Question: {last_user_msg}\nAnswer concisely."
+
+        reply = qwen_vl_generator.generate(
+            cropped_pil, 
+            context_text=final_prompt,
+            api_key=request.api_key,
+            base_url=request.base_url,
+            model_name=model_name
+        )
+        
+        return {"reply": reply}
+
+    except Exception as e:
+        print(f"Chat failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

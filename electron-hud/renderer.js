@@ -1,7 +1,11 @@
 const screenshot = document.getElementById('screenshot');
 const overlay = document.getElementById('overlay');
 const tooltip = document.getElementById('tooltip');
+const tooltipContent = document.getElementById('tooltip-content');
+const pluginActions = document.getElementById('plugin-actions');
 const loading = document.getElementById('loading');
+const chatInput = document.getElementById('chat-input');
+const sendBtn = document.getElementById('send-btn');
 
 // Settings Elements
 const settingsPanel = document.getElementById('settings-panel');
@@ -11,7 +15,13 @@ const baseUrlInput = document.getElementById('base-url-input');
 const saveSettingsBtn = document.getElementById('save-settings-btn');
 const closeSettingsBtn = document.getElementById('close-settings-btn');
 
+// Window Controls
+const hideBtn = document.getElementById('hide-btn');
+const closeBtn = document.getElementById('close-btn');
+
 let currentImageBase64 = null;
+let currentBBox = null;
+let chatHistory = [];
 
 // Load Settings from LocalStorage
 const savedApiKey = localStorage.getItem('qwen_api_key');
@@ -70,6 +80,19 @@ saveSettingsBtn.addEventListener('click', (e) => {
     alert('Settings Saved!');
 });
 
+// Window Control Logic
+hideBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    window.electronAPI.hideWindow();
+});
+
+closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    window.electronAPI.hideWindow();
+    window.electronAPI.resetCapture(); // Tell main process next Alt+X should capture
+    clearOverlay(); // Clear content on close
+});
+
 // Prevent clicks inside settings panel from triggering image click
 settingsPanel.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -83,6 +106,8 @@ window.electronAPI.onCaptureResult((imageData) => {
     
     // Reset UI
     clearOverlay();
+    chatHistory = []; // Reset chat history on new screenshot
+    currentBBox = null;
 });
 
 // Handle Esc Key
@@ -98,12 +123,21 @@ function clearOverlay() {
     tooltip.style.display = 'none';
     loading.style.display = 'none';
     loading.classList.remove('active');
+    tooltipContent.innerHTML = '';
+    pluginActions.innerHTML = '';
+    pluginActions.style.display = 'none';
+    chatInput.value = '';
 }
 
 // Handle Click
 screenshot.addEventListener('click', async (e) => {
     if (!currentImageBase64) return;
-
+    
+    // Ignore clicks if settings panel is open
+    if (settingsPanel.style.display === 'block') return;
+    
+    // Ignore clicks on tooltip itself (handled by stopPropagation on tooltip)
+    
     // Show loading
     loading.style.left = (e.clientX - 20) + 'px';
     loading.style.top = (e.clientY - 20) + 'px';
@@ -121,8 +155,6 @@ screenshot.addEventListener('click', async (e) => {
     try {
         const apiKey = localStorage.getItem('qwen_api_key') || '';
         const baseUrl = localStorage.getItem('qwen_base_url') || '';
-        // Add model_name support if saved (currently not in settings UI but might come from global config)
-        // Ideally we should save model_name in localStorage too when syncing config.
         const qwenModel = localStorage.getItem('qwen_model') || 'Qwen/Qwen2-VL-7B-Instruct';
 
         const response = await fetch('http://localhost:8000/analyze/screen', {
@@ -156,9 +188,24 @@ screenshot.addEventListener('click', async (e) => {
             drawMask(data.svg_path, scaleX, scaleY);
         }
         
+        // Store BBox for chat
+        if (data.bbox) {
+            currentBBox = data.bbox;
+        }
+
         // Show Tooltip
         if (data.description) {
             showTooltip(e.clientX, e.clientY, data.description);
+            // Add initial description to chat history
+            chatHistory = [
+                { role: 'user', content: 'Identify this object.' },
+                { role: 'assistant', content: data.description }
+            ];
+            
+            // Render Plugins
+            if (data.plugins && data.plugins.length > 0) {
+                renderPlugins(data.plugins, data.description);
+            }
         }
 
     } catch (error) {
@@ -168,29 +215,139 @@ screenshot.addEventListener('click', async (e) => {
     }
 });
 
+// Chat Logic
+async function sendChat() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    
+    // Display user message immediately
+    appendChatMessage('user', text);
+    chatInput.value = '';
+    
+    try {
+        const apiKey = localStorage.getItem('qwen_api_key') || '';
+        const baseUrl = localStorage.getItem('qwen_base_url') || '';
+        const qwenModel = localStorage.getItem('qwen_model') || 'Qwen/Qwen2-VL-7B-Instruct';
+        
+        // Prepare context
+        // We need to send the image crop again or handle it statefully in backend.
+        // For simplicity, let's re-send the request to a new chat endpoint
+        
+        const response = await fetch('http://localhost:8000/analyze/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image: currentImageBase64,
+                bbox: currentBBox,
+                messages: [...chatHistory, { role: 'user', content: text }],
+                api_key: apiKey,
+                base_url: baseUrl,
+                qwen_model: qwenModel
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.reply) {
+            appendChatMessage('assistant', data.reply);
+            chatHistory.push({ role: 'user', content: text });
+            chatHistory.push({ role: 'assistant', content: data.reply });
+        }
+        
+    } catch (e) {
+        appendChatMessage('assistant', "Error: " + e.message);
+    }
+}
+
+function appendChatMessage(role, text) {
+    const div = document.createElement('div');
+    div.className = `chat-message ${role === 'user' ? 'user' : 'ai'}`;
+    div.textContent = text;
+    tooltipContent.appendChild(div);
+    // Scroll to bottom
+    const tooltip = document.getElementById('tooltip');
+    tooltip.scrollTop = tooltip.scrollHeight;
+}
+
+sendBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    sendChat();
+});
+
+chatInput.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // Allow typing
+    if (e.key === 'Enter') {
+        sendChat();
+    }
+});
+
+// Prevent clicks inside tooltip from closing it or triggering image click
+tooltip.addEventListener('click', (e) => {
+    e.stopPropagation();
+});
+
+function renderPlugins(plugins, description) {
+    pluginActions.innerHTML = '';
+    pluginActions.style.display = 'flex';
+    
+    plugins.forEach(p => {
+        const btn = document.createElement('button');
+        btn.className = 'plugin-btn';
+        btn.innerHTML = `${p.icon} ${p.name}`;
+        btn.title = p.description;
+        
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            appendChatMessage('user', `Run plugin: ${p.name}`);
+            
+            try {
+                const response = await fetch('http://localhost:8000/plugin/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plugin_id: p.id,
+                        context: {
+                            description: description,
+                            // Add more context if needed
+                        }
+                    })
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    appendChatMessage('assistant', `Plugin Result: ${result.result}`);
+                } else {
+                    appendChatMessage('assistant', `Plugin Error: ${result.message}`);
+                }
+            } catch (err) {
+                appendChatMessage('assistant', `Error: ${err.message}`);
+            }
+        };
+        
+        pluginActions.appendChild(btn);
+    });
+}
+
 function drawMask(svgPathData, scaleX, scaleY) {
     // Create SVG Path
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", svgPathData);
     path.setAttribute("class", "mask-path");
     
-    // Apply transform to scale mask back to screen coordinates
-    // SVG coordinate system matches the image natural size if we don't scale.
-    // Wait, the SVG is overlaid on the screen (CSS pixels).
-    // The path data is in image pixels (natural size).
-    // So we need to scale the path DOWN to screen size.
-    // transform="scale(1/scaleX, 1/scaleY)"
-    
     path.setAttribute("transform", `scale(${1/scaleX}, ${1/scaleY})`);
     
-    // Clear previous paths? Maybe keep them? Let's clear for now.
     overlay.innerHTML = '';
     overlay.appendChild(path);
 }
 
 function showTooltip(x, y, text) {
-    tooltip.innerHTML = text; // Allow HTML/Markdown if parsed
-    tooltip.style.display = 'block';
+    tooltipContent.innerHTML = ''; // Clear previous content
+    const initialMsg = document.createElement('div');
+    initialMsg.className = 'chat-message ai';
+    initialMsg.innerHTML = text; // Allow HTML if backend returns it, otherwise textContent
+    tooltipContent.appendChild(initialMsg);
+    
+    tooltip.style.display = 'flex'; // Use flex for column layout
     
     // Position logic to keep inside screen
     const rect = tooltip.getBoundingClientRect();

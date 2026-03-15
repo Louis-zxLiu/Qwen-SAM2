@@ -1,0 +1,9 @@
+{
+  "id": "com.qwen.taobao_search",
+  "name": "Taobao Search",
+  "description": "Search for this product on Taobao",
+  "icon": "🛍️",
+  "triggers": {
+    "keywords": ["product", "shoe", "bag", "cloth", "buy", "price", "shop", "store", "brand"]
+  }
+}

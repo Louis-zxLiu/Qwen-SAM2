@@ -1,15 +1,29 @@
-fastapi
-uvicorn
-python-multipart
-torch
+# Core Framework
+fastapi>=0.115.5
+uvicorn>=0.32.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.0
+pydantic>=2.10.6
+
+# Machine Learning & AI
+torch>=2.5.1
 transformers>=4.45.0
 tokenizers>=0.22.0,<=0.23.0
 huggingface_hub>=0.23.0
-accelerate
-opencv-python
-pillow
-numpy
-openai
-moviepy
-timm
-packaging
+accelerate>=1.1.0
+timm>=0.6.13
+openai>=1.61.1
+
+# Computer Vision & Image Processing
+opencv-python>=4.10.0
+pillow>=11.0.0
+numpy>=1.26.0
+moviepy>=2.0.0
+
+# Utilities
+pyperclip>=1.9.0
+requests>=2.32.0
+aiofiles>=23.2.0
+watchfiles>=1.0.0
+colorama>=0.4.6
+packaging>=24.0

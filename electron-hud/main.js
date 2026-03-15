@@ -18,9 +18,13 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false // Allow loading local resources if needed
+      webSecurity: false
     }
   });
+
+  // Ensure window is always on top, even during focus loss
+  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   mainWindow.loadFile('index.html');
   // mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -29,23 +33,44 @@ function createWindow() {
   mainWindow.hide();
 }
 
+let hasCaptured = false;
+
+// IPC to reset capture state (called when user explicitly closes or starts new)
+ipcMain.on('reset-capture', () => {
+  hasCaptured = false;
+});
+
+app.on('browser-window-blur', () => {
+  // Only show if window was already visible (prevents showing on startup focus loss)
+  if (mainWindow && mainWindow.isVisible()) {
+    mainWindow.showInactive();
+  }
+});
+
 app.whenReady().then(() => {
   createWindow();
-
-  // Register Alt+X shortcut
+  
   const ret = globalShortcut.register('Alt+X', () => {
-    captureAndShow();
+    if (!hasCaptured || (mainWindow && mainWindow.isVisible())) {
+      // If we haven't captured yet OR the window is already visible, capture NEW
+      captureAndShow();
+      hasCaptured = true;
+    } else {
+      // If window is hidden and we have an old capture, just RESTORE visibility
+      mainWindow.show();
+      mainWindow.focus();
+    }
   });
 
   if (!ret) {
     console.log('Registration failed');
   }
+});
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
 });
 
 app.on('window-all-closed', () => {

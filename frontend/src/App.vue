@@ -78,6 +78,8 @@
                 @play="onVideoPlay"
                 @pause="onVideoPause"
                 @seeked="onVideoSeeked"
+                @loadedmetadata="videoDuration = $event.target.duration"
+                @timeupdate="currentTime = $event.target.currentTime"
               ></video>
               
               <!-- Mask Overlay -->
@@ -94,6 +96,27 @@
                 @mouseup="handleCanvasMouseUp"
                 @mouseleave="handleCanvasMouseLeave"
               ></canvas>
+            </div>
+
+            <!-- Timeline UI -->
+            <div class="timeline-container">
+              <div style="display: flex; justify-content: space-between; color: #fff; font-size: 12px; margin-bottom: 5px;">
+                  <span>Start: {{ formatTime(segmentRange[0]) }}</span>
+                  <span>End: {{ formatTime(segmentRange[1]) }}</span>
+              </div>
+              <el-slider 
+                  v-model="segmentRange" 
+                  range 
+                  :max="videoDuration" 
+                  :step="0.1"
+                  :format-tooltip="formatTime"
+                  @change="onTimelineChange"
+              />
+              <div style="text-align: right; margin-top: 5px;">
+                   <el-button type="warning" size="small" @click="trimVideo">
+                      <el-icon><Scissor /></el-icon> Trim & Segment
+                   </el-button>
+              </div>
             </div>
             
             <!-- Tools Toolbar -->
@@ -157,15 +180,38 @@
 
 <script setup>
 import { ref, onMounted, nextTick, watch } from 'vue'
-import { UploadFilled, VideoPlay, CirclePlus, Remove, EditPen, Monitor } from '@element-plus/icons-vue'
+import { UploadFilled, VideoPlay, CirclePlus, Remove, EditPen, Monitor, Scissor } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
 
 const videoSource = ref(null)
+
+// Timeline State
+const videoDuration = ref(0)
+const currentTime = ref(0)
+const segmentRange = ref([0, 10]) // Default range [start, end]
 const apiKey = ref('')
 const baseUrl = ref('')
 const qwenModel = ref('Qwen/Qwen2-VL-7B-Instruct')
 const sam2Model = ref('facebook/sam2-hiera-tiny')
+
+const formatTime = (val) => {
+  const min = Math.floor(val / 60)
+  const sec = Math.floor(val % 60)
+  return `${min}:${sec < 10 ? '0' + sec : sec}`
+}
+
+const onTimelineChange = (val) => {
+  // Seek video to start point when range changes
+  if (videoElement.value) {
+    videoElement.value.currentTime = val[0]
+  }
+}
+
+const trimVideo = () => {
+  ElMessage.info(`Trimming video from ${formatTime(segmentRange.value[0])} to ${formatTime(segmentRange.value[1])}`)
+  // TODO: Send backend API to trim video
+}
 
 const launchHUD = async () => {
   try {
@@ -457,46 +503,66 @@ const drawPointsOverlay = (ctx) => {
 }
 
 const runAnalysis = async () => {
-  if (loading.value || accumulatedPoints.value.length === 0) return
+  if (!serverVideoPath.value) {
+    ElMessage.error("Please upload a video first")
+    return
+  }
+  
+  if (accumulatedPoints.value.length === 0 && interactionMode.value !== 'view') {
+    ElMessage.warning("Please add some points or scribbles first")
+    return
+  }
   
   loading.value = true
   
   try {
-    const video = videoElement.value
-    const formData = new FormData()
-    formData.append('video_path', serverVideoPath.value)
-    
+    // Send points to backend
+    // Format: [[x, y], [x, y]], labels: [1, 0]
     const points = accumulatedPoints.value.map(p => [p.x, p.y])
     const labels = accumulatedPoints.value.map(p => p.label)
     
+    const formData = new FormData()
+    formData.append('video_path', serverVideoPath.value)
     formData.append('points_json', JSON.stringify(points))
     formData.append('labels_json', JSON.stringify(labels))
+    formData.append('timestamp', videoElement.value.currentTime)
+    formData.append('frame_width', videoElement.value.videoWidth)
+    formData.append('frame_height', videoElement.value.videoHeight)
     
-    formData.append('timestamp', video.currentTime)
-    formData.append('frame_width', video.videoWidth)
-    formData.append('frame_height', video.videoHeight)
-    
-    if (apiKey.value) formData.append('api_key', apiKey.value)
-    if (baseUrl.value) formData.append('base_url', baseUrl.value)
+    // Add config
+    formData.append('api_key', apiKey.value)
+    formData.append('base_url', baseUrl.value)
     formData.append('qwen_model', qwenModel.value)
     formData.append('sam2_model', sam2Model.value)
 
-    const response = await axios.post('http://127.0.0.1:8000/predict', formData)
-    const result = response.data
+    // Add Time Range
+    formData.append('start_time', segmentRange.value[0])
+    formData.append('end_time', segmentRange.value[1])
     
-    transcription.value = result.transcription
+    const response = await fetch('http://localhost:8000/process', {
+      method: 'POST',
+      body: formData
+    })
+    
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+    }
+    
+    const result = await response.json()
+    console.log("Analysis Result:", result)
+    
     encyclopedia.value = result.encyclopedia
+    transcription.value = result.transcription
     
-    if (result.segmented_video_url) {
-      // If we have a segmented video, use it and CLEAR the static mask overlay
-      // because the video itself contains the visualization.
-      currentMaskUrl.value = null 
-      
-      videoElement.value.pause()
-      videoSource.value = result.segmented_video_url
-      setTimeout(() => {
-        if (videoElement.value) videoElement.value.play()
-      }, 500)
+    if (result.video_url) {
+        currentMaskUrl.value = null // Clear static mask
+        // Replace video source with processed video
+        // videoSource.value = `http://localhost:8000${result.video_url}`
+        // Ideally we should overlay the result video or show side-by-side.
+        // For prototype, let's open in new tab or replace.
+        // Let's replace.
+        videoSource.value = `http://localhost:8000${result.video_url}`
+        ElMessage.success("Analysis Complete! Video updated with segmentation.")
     } else {
         // Only show static mask if NO video result (fallback)
         currentMaskUrl.value = result.mask
@@ -506,7 +572,7 @@ const runAnalysis = async () => {
     
   } catch (err) {
     console.error(err)
-    alert("Analysis failed: " + (err.response?.data?.detail || err.message))
+    ElMessage.error("Analysis failed: " + (err.message || "Unknown error"))
   } finally {
     loading.value = false
   }
@@ -539,11 +605,21 @@ const runAnalysis = async () => {
   display: flex;
   justify-content: center;
   align-items: center;
+  flex-direction: column;
 }
 .video-player {
   max-width: 100%;
   max-height: 600px;
   display: block;
+}
+.timeline-container {
+  width: 100%;
+  padding: 10px;
+  background: #1a1a1a;
+  margin-top: 10px;
+}
+.timeline-slider {
+  width: 100%;
 }
 .mask-overlay {
   position: absolute;

@@ -51,7 +51,7 @@
             padding: 15px;
             border-radius: 8px;
             max-width: 300px;
-            max-height: 200px;
+            max-height: 400px; /* Increased height for chat */
             overflow-y: auto;
             font-size: 14px;
             line-height: 1.5;
@@ -62,6 +62,77 @@
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
             scrollbar-width: thin;
             scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+            display: flex;
+            flex-direction: column;
+        }
+        .tooltip-content {
+            margin-bottom: 10px;
+        }
+        .chat-input-area {
+            display: flex;
+            gap: 5px;
+            margin-top: auto;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        .chat-input-area input {
+            flex: 1;
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: white;
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .chat-input-area button {
+            background: #409eff;
+            border: none;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .chat-message {
+            margin-bottom: 8px;
+            padding: 5px;
+            border-radius: 4px;
+        }
+        .chat-message.user {
+            background: rgba(64, 158, 255, 0.2);
+            align-self: flex-end;
+            text-align: right;
+        }
+        .chat-message.ai {
+            background: rgba(255, 255, 255, 0.05);
+            align-self: flex-start;
+        }
+        
+        /* Plugin Action Bar */
+        .plugin-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .plugin-btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .plugin-btn:hover {
+            background: rgba(64, 158, 255, 0.3);
+            border-color: #409eff;
         }
         /* Webkit scrollbar styles */
         #tooltip::-webkit-scrollbar {
@@ -111,6 +182,39 @@
             background: rgba(0, 0, 0, 0.8);
             transform: scale(1.1);
         }
+        
+        /* Window Controls (Top-Right) */
+        .window-controls {
+            position: absolute;
+            top: 20px;
+            right: 80px; /* To the left of settings button */
+            display: flex;
+            gap: 10px;
+            z-index: 100;
+        }
+        .control-btn {
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(5px);
+        }
+        .control-btn:hover {
+            background: rgba(0, 0, 0, 0.8);
+            border-color: #409eff;
+        }
+        .control-btn.close:hover {
+            background: #f56c6c;
+            border-color: #f56c6c;
+        }
+        
         #settings-panel {
             position: absolute;
             top: 70px;
@@ -173,7 +277,21 @@
     <div id="container">
         <img id="screenshot" src="" alt="Screen Capture">
         <svg id="overlay"></svg>
-        <div id="tooltip"></div>
+        
+        <!-- Window Controls -->
+        <div class="window-controls">
+            <button id="hide-btn" class="control-btn" title="Hide HUD (Wait for AI)">− 隐藏</button>
+            <button id="close-btn" class="control-btn close" title="Close HUD">✕ 关闭</button>
+        </div>
+        
+        <div id="tooltip">
+            <div id="tooltip-content" class="tooltip-content"></div>
+            <div id="plugin-actions" class="plugin-actions" style="display: none;"></div>
+            <div class="chat-input-area">
+                <input type="text" id="chat-input" placeholder="Ask AI about this..." />
+                <button id="send-btn">➤</button>
+            </div>
+        </div>
         <div id="loading"></div>
         
         <!-- Settings Panel -->

@@ -1,0 +1,9 @@
+{
+  "id": "com.qwen.google_search",
+  "name": "Google Search",
+  "description": "Search this object on Google",
+  "icon": "🔍",
+  "triggers": {
+    "universal": true
+  }
+}
