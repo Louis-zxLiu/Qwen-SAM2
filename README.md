@@ -8,7 +8,12 @@
 
 ## 🌟 核心功能
 
-1.  **交互式视频分割 (SAM 2)**
+1.  **全知视界 HUD (Omni-Context HUD)** 🔥 
+    *   **屏幕感知**: 无需上传文件，一键截取当前屏幕，AI 实时分析。
+    *   **哪里不懂点哪里**: 点击屏幕任意位置，SAM2 毫秒级分割目标，Qwen-VL 自动识别并解释。
+    *   **无缝集成**: 独立的 Electron 客户端，通过快捷键 `Alt+X` 随时唤醒。
+
+2.  **交互式视频分割 (SAM 2)**
     *   **多点提示**: 支持添加多个**正点**（目标区域）和**负点**（背景区域）来精确控制分割范围。
     *   **涂鸦输入 (Scribble)**: 支持通过画笔涂鸦来标记目标区域，提供更直观的交互方式。
     *   **全视频传播**: 基于单帧的提示，利用 SAM 2 的视频传播机制，自动分割整个视频序列中的目标。
@@ -123,6 +128,21 @@ npm install
 npm run dev
 ```
 
+### 3. 全知视界 HUD 设置
+
+```bash
+cd electron-hud
+
+# 安装依赖
+npm install
+
+# 启动 HUD 客户端
+npm start
+```
+*   **快捷键**: 按下 `Alt+X` 截取当前屏幕并进行 AI 交互。
+*   **交互**: 点击屏幕上的任意位置，SAM2 会自动分割目标，Qwen-VL 会解释该物体。
+*   **退出**: 按 `Esc` 键隐藏 HUD。
+
 ---
 
 ## 📖 使用指南
@@ -193,6 +213,11 @@ Qwen-SAM2/
 │   │   └── main.js          # 入口文件
 │   ├── package.json         # npm 依赖配置
 │   └── vite.config.js       # Vite 配置
+├── electron-hud/            # 全知视界 HUD 客户端
+│   ├── main.js              # Electron 主进程
+│   ├── renderer.js          # 渲染进程与交互逻辑
+│   ├── index.html           # HUD 界面
+│   └── package.json         # Electron 依赖
 ├── start.py                 # 一键启动脚本
 └── README.md                # 项目说明书
 ```

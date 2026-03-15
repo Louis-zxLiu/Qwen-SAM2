@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Qwen-SAM2 HUD</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: transparent;
+            font-family: 'Segoe UI', sans-serif;
+        }
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+        #screenshot {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* or contain, but cover fills screen */
+            z-index: 1;
+            cursor: crosshair;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            pointer-events: none; /* Let clicks pass through to image */
+        }
+        .mask-path {
+            fill: rgba(64, 158, 255, 0.2);
+            stroke: rgba(64, 158, 255, 0.8);
+            stroke-width: 2;
+            filter: drop-shadow(0 0 5px rgba(64, 158, 255, 0.5));
+            transition: all 0.3s ease;
+        }
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            max-width: 300px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.5;
+            z-index: 3;
+            display: none;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+        }
+        /* Webkit scrollbar styles */
+        #tooltip::-webkit-scrollbar {
+            width: 6px;
+        }
+        #tooltip::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        #tooltip::-webkit-scrollbar-thumb {
+            background-color: rgba(255, 255, 255, 0.3);
+            border-radius: 3px;
+        }
+        #loading {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            z-index: 4;
+            display: none;
+            pointer-events: none;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Settings Panel Styles */
+        #settings-toggle-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        #settings-toggle-btn:hover {
+            background: rgba(0, 0, 0, 0.8);
+            transform: scale(1.1);
+        }
+        #settings-panel {
+            position: absolute;
+            top: 70px;
+            right: 20px;
+            width: 300px;
+            background: rgba(30, 30, 30, 0.95);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
+            z-index: 10;
+            display: none; /* Hidden by default */
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            backdrop-filter: blur(10px);
+        }
+        #settings-panel h3 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding-bottom: 10px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 12px;
+            color: #aaa;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            color: white;
+            box-sizing: border-box; /* Fix width overflow */
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #409eff;
+        }
+        #settings-panel button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background: #409eff;
+            color: white;
+            margin-right: 10px;
+        }
+        #settings-panel button:hover {
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <img id="screenshot" src="" alt="Screen Capture">
+        <svg id="overlay"></svg>
+        <div id="tooltip"></div>
+        <div id="loading"></div>
+        
+        <!-- Settings Panel -->
+        <div id="settings-panel">
+            <h3>HUD Settings</h3>
+            <div class="form-group">
+                <label>Dashscope API Key:</label>
+                <input type="password" id="api-key-input" placeholder="sk-..." />
+            </div>
+            <div class="form-group">
+                <label>Base URL:</label>
+                <input type="text" id="base-url-input" placeholder="https://api.siliconflow.cn/v1" value="https://api.siliconflow.cn/v1" />
+            </div>
+            <button id="save-settings-btn">Save</button>
+            <button id="close-settings-btn" style="background: #666;">Cancel</button>
+        </div>
+        <button id="settings-toggle-btn">⚙️</button>
+    </div>
+    <script src="renderer.js"></script>
+</body>
+</html>

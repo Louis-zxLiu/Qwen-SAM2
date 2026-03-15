@@ -4,6 +4,9 @@
       <template #header>
         <div class="card-header">
           <span>Upload Video for Prototype Demo</span>
+          <el-button type="primary" size="small" @click="launchHUD" style="margin-left: auto;">
+            <el-icon><Monitor /></el-icon> Launch HUD
+          </el-button>
         </div>
       </template>
       <div style="margin-bottom: 20px;">
@@ -154,7 +157,8 @@
 
 <script setup>
 import { ref, onMounted, nextTick, watch } from 'vue'
-import { UploadFilled, VideoPlay, CirclePlus, Remove, EditPen } from '@element-plus/icons-vue'
+import { UploadFilled, VideoPlay, CirclePlus, Remove, EditPen, Monitor } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import axios from 'axios'
 
 const videoSource = ref(null)
@@ -162,6 +166,29 @@ const apiKey = ref('')
 const baseUrl = ref('')
 const qwenModel = ref('Qwen/Qwen2-VL-7B-Instruct')
 const sam2Model = ref('facebook/sam2-hiera-tiny')
+
+const launchHUD = async () => {
+  try {
+    const response = await fetch('http://localhost:8000/system/launch-hud', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey.value,
+        base_url: baseUrl.value,
+        qwen_model: qwenModel.value,
+        sam2_model: sam2Model.value
+      })
+    })
+    const data = await response.json()
+    if (data.status === 'success') {
+      ElMessage.success('HUD Launched! Settings synced.')
+    } else {
+      ElMessage.error('Failed to launch HUD: ' + data.message)
+    }
+  } catch (e) {
+    ElMessage.error('Error launching HUD: ' + e.message)
+  }
+}
 const serverVideoPath = ref(null)
 const uploadProgress = ref(0)
 const activeCollapse = ref(['1'])
@@ -491,6 +518,11 @@ const runAnalysis = async () => {
   max-width: 1400px;
   margin: 0 auto;
   padding: 20px;
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 .upload-section {
   max-width: 600px;

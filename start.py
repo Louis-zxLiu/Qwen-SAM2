@@ -80,12 +80,14 @@ def main():
     backend_dir = os.path.join(current_dir, "backend")
     
     # Check for venv python
-    venv_python = os.path.join(backend_dir, "venv", "Scripts", "python.exe")
-    if os.path.exists(venv_python):
-        python_exec = venv_python
-    else:
-        python_exec = "python"
-        print("[WARNING] Virtual environment not found, using system python.")
+    # FORCE SYSTEM PYTHON: Bypass broken venv
+    python_exec = "python"
+    # venv_python = os.path.join(backend_dir, "venv", "Scripts", "python.exe")
+    # if os.path.exists(venv_python):
+    #     python_exec = venv_python
+    # else:
+    #     python_exec = "python"
+    #     print("[WARNING] Virtual environment not found, using system python.")
 
     # Command to run uvicorn
     # Pass environment variables to the new process

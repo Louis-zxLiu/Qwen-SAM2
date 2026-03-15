@@ -488,7 +488,7 @@ class QwenVLGenerator:
             # Map model names if necessary (e.g., qwen-vl-max -> Pro/Qwen/Qwen2-VL-7B-Instruct)
             # But user can select/type model name in frontend.
             
-            prompt = f"Context from audio: {context_text}. Identify the main object in this image and provide a brief encyclopedia summary."
+            prompt = f"Context from audio: {context_text}. Identify the main object in this image. Please keep the answer concise, under 100 words. Format the response with a short title, followed by 3 key bullet points."
             print(f"[QwenVL] Prompt: {prompt}")
             
             response = client.chat.completions.create(
@@ -508,7 +508,7 @@ class QwenVLGenerator:
                     }
                 ],
                 # Add max_tokens to avoid timeouts or large responses
-                max_tokens=512,
+                max_tokens=256,
                 stream=False
             )
             

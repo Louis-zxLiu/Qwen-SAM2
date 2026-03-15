@@ -12,6 +12,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
+from pydantic import BaseModel
 
 # Import custom utilities (to be implemented)
 from utils import Sam2Predictor, WhisperTranscriber, QwenVLGenerator
@@ -239,6 +240,170 @@ async def predict(
                 "traceback": traceback.format_exc()
             }
         )
+
+class ScreenAnalysisRequest(BaseModel):
+    image: str # Base64 encoded
+    click_x: int
+    click_y: int
+    mode: str = "identify" # "segment" or "identify"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    qwen_model: Optional[str] = None
+
+@app.post("/analyze/screen")
+async def analyze_screen(request: ScreenAnalysisRequest):
+    global sam2_predictor, whisper_transcriber, qwen_vl_generator
+
+    # Auto-load models if not already loaded (HUD specific)
+    if sam2_predictor is None:
+        print("[HUD] Lazy loading SAM2 model...")
+        try:
+             # Use global config sam2 model if available
+             model_id = global_config.get("sam2_model", "facebook/sam2-hiera-tiny")
+             sam2_predictor = Sam2Predictor(model_id=model_id)
+        except Exception as e:
+            print(f"[HUD] Failed to load SAM2: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to load SAM2: {e}")
+
+    if not sam2_predictor:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    try:
+        # 1. Decode Image
+        if "," in request.image:
+            header, encoded = request.image.split(",", 1)
+        else:
+            encoded = request.image
+            
+        image_data = base64.b64decode(encoded)
+        pil_image = Image.open(BytesIO(image_data)).convert("RGB")
+        frame = np.array(pil_image)
+        # Convert RGB to BGR for OpenCV/SAM2
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        
+        # 2. SAM2 Segmentation
+        # Points: [[x, y]], Labels: [1] (positive click)
+        # Use simple predict for single frame
+        mask, _ = sam2_predictor.predict(
+            frame, 
+            points=[[request.click_x, request.click_y]], 
+            labels=[1]
+        )
+        
+        # 3. Generate SVG Path from Mask
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        svg_path = ""
+        bbox = [0, 0, 0, 0]
+        
+        if contours:
+            # Get the largest contour
+            c = max(contours, key=cv2.contourArea)
+            
+            # Calculate Bounding Box
+            x, y, w, h = cv2.boundingRect(c)
+            bbox = [x, y, w, h]
+            
+            # Create SVG Path
+            # Move to first point
+            if len(c) > 0:
+                svg_path = f"M {c[0][0][0]} {c[0][0][1]} "
+                for point in c[1:]:
+                    svg_path += f"L {point[0][0]} {point[0][1]} "
+                svg_path += "Z"
+
+        # 4. Qwen-VL Identification (if mode is identify)
+        description = ""
+        if request.mode == "identify" and bbox[2] > 0 and bbox[3] > 0:
+            # Crop image with padding
+            padding = 50
+            h_img, w_img = frame.shape[:2]
+            x1 = max(0, bbox[0] - padding)
+            y1 = max(0, bbox[1] - padding)
+            x2 = min(w_img, bbox[0] + bbox[2] + padding)
+            y2 = min(h_img, bbox[1] + bbox[3] + padding)
+            
+            cropped_frame = frame[y1:y2, x1:x2]
+            cropped_pil = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
+            
+            # Initialize Qwen if needed
+            global qwen_vl_generator
+            if qwen_vl_generator is None:
+                qwen_vl_generator = QwenVLGenerator()
+            
+            # Use model from request, or global config, or default
+            model_name = request.qwen_model or global_config.get("qwen_model") or "Qwen/Qwen2-VL-7B-Instruct"
+            
+            description = qwen_vl_generator.generate(
+                cropped_pil, 
+                context_text="User clicked on screen to identify this object.",
+                api_key=request.api_key,
+                base_url=request.base_url,
+                model_name=model_name
+            )
+
+        return {
+            "svg_path": svg_path,
+            "bbox": bbox,
+            "description": description
+        }
+
+    except Exception as e:
+        print(f"Screen analysis failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+import subprocess
+
+# Global config store
+global_config = {
+    "api_key": None,
+    "base_url": "https://api.siliconflow.cn/v1",
+    "qwen_model": "Qwen/Qwen2-VL-7B-Instruct",
+    "sam2_model": "facebook/sam2-hiera-tiny"
+}
+
+class LaunchHUDRequest(BaseModel):
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    qwen_model: Optional[str] = None
+    sam2_model: Optional[str] = None
+
+@app.post("/system/launch-hud")
+async def launch_hud(request: LaunchHUDRequest):
+    try:
+        # Update global config with values from frontend
+        global global_config
+        if request.api_key: global_config["api_key"] = request.api_key
+        if request.base_url: global_config["base_url"] = request.base_url
+        if request.qwen_model: global_config["qwen_model"] = request.qwen_model
+        if request.sam2_model: global_config["sam2_model"] = request.sam2_model
+        
+        print(f"[System] HUD Config Updated: BaseURL={global_config['base_url']}, Model={global_config['qwen_model']}")
+
+        # Assuming backend is running in D:\Qwen-SAM2\backend
+        # And electron-hud is in D:\Qwen-SAM2\electron-hud
+        current_dir = os.getcwd()
+        project_root = os.path.dirname(current_dir) # Go up one level
+        hud_dir = os.path.join(project_root, "electron-hud")
+        
+        print(f"[System] Launching HUD from {hud_dir}...")
+        
+        if os.name == 'nt': # Windows
+            cmd = f'start "HUD" cmd /c "npm start"'
+            subprocess.Popen(cmd, shell=True, cwd=hud_dir)
+        else: # Linux/Mac
+            subprocess.Popen(["npm", "start"], cwd=hud_dir)
+            
+        return {"status": "success", "message": "HUD launching in background"}
+    except Exception as e:
+        print(f"[System] Failed to launch HUD: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/system/config")
+async def get_config():
+    return global_config
 
 if __name__ == "__main__":
     import uvicorn
